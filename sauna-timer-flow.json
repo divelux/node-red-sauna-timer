@@ -1,0 +1,330 @@
+[
+  {
+    "id": "d1a5e7c0b2f4a000",
+    "type": "tab",
+    "label": "Sauna timer",
+    "disabled": false,
+    "info": "Sauna round timer and a \"sauna is ready\" notification, core nodes only.\n\nMade by DIVELUX, handmade wool sauna hats: https://diveluxsaunahat.com\nMore free sauna tools: https://diveluxsaunahat.com/pages/sauna-tools\n\nMIT License, (c) 2026 DIVELUX Inc. Not medical advice: step out sooner if you feel dizzy, sick or faint."
+  },
+  {
+    "id": "d1a5e7c0b2f40001",
+    "type": "comment",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Round timer: heat, break, repeat, final cool-down",
+    "info": "Press \"Start\" to run the session. \"Round timer\" sends one message at the start of each part.\nChange rounds / heat / rest (minutes) in the Start inject. Replace the \"Notify\" debug node with your\nnotification node (Home Assistant, Telegram, Pushover, e-mail...). It gets msg.title and msg.payload as text.\n\nThe \"Test run\" inject sends msg.minuteMs = 1000, so a whole session takes seconds instead of an hour.",
+    "x": 200,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "d1a5e7c0b2f40002",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Start: 3 x 10 min",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"start\",\"rounds\":3,\"heat\":10,\"rest\":10}",
+    "payloadType": "json",
+    "x": 150,
+    "y": 120,
+    "wires": [
+      [
+        "d1a5e7c0b2f40005"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40003",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Stop",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"stop\"}",
+    "payloadType": "json",
+    "x": 110,
+    "y": 160,
+    "wires": [
+      [
+        "d1a5e7c0b2f40005"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40004",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Test run (1 min = 1 s)",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      },
+      {
+        "p": "minuteMs",
+        "v": "1000",
+        "vt": "num"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"cmd\":\"start\",\"rounds\":2,\"heat\":3,\"rest\":2}",
+    "payloadType": "json",
+    "x": 160,
+    "y": 200,
+    "wires": [
+      [
+        "d1a5e7c0b2f40005"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40005",
+    "type": "function",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Round timer",
+    "func": "// Sauna round timer. (c) 2026 DIVELUX Inc. MIT License. https://diveluxsaunahat.com\n// In:  msg.payload = { cmd: \"start\", rounds, heat, rest, cooldown }  or  { cmd: \"stop\" }\n// Out: one message at the start of each part, then one when the session is done:\n//      msg.topic = \"sauna/phase\", msg.payload = { kind, round, rounds, minutes, index, parts, label }\n// Rules are the same as the <sauna-timer> element: 1-6 rounds, 1-35 min per round,\n// 1-30 min of break, a final cool-down that defaults to the break length.\n// These are bounds for a timer, not advice. Not medical advice.\nconst p = (msg.payload && typeof msg.payload === 'object') ? msg.payload : { cmd: String(msg.payload || '') };\nconst cmd = String(p.cmd || '').toLowerCase();\n\nfunction clamp(v, min, max, def) {\n    const n = typeof v === 'number' ? v : parseFloat(v);\n    if (!isFinite(n)) return def;\n    return Math.min(max, Math.max(min, Math.round(n)));\n}\n\nfunction stop(reason) {\n    const t = context.get('timer');\n    if (t) clearTimeout(t);\n    context.set('timer', null);\n    context.set('session', null);\n    node.status({ fill: 'grey', shape: 'ring', text: reason || 'stopped' });\n}\n\nif (cmd === 'stop') {\n    const was = context.get('session');\n    stop('stopped');\n    if (!was) return null;\n    return { topic: 'sauna/phase', payload: { kind: 'stopped', label: 'Session stopped' } };\n}\nif (cmd !== 'start') {\n    node.warn('round timer: send { \"cmd\": \"start\" } or { \"cmd\": \"stop\" }');\n    return null;\n}\n\nconst rounds = clamp(p.rounds, 1, 6, 3);\nconst heat = clamp(p.heat, 1, 35, 10);\nconst rest = clamp(p.rest, 1, 30, 10);\nconst cooldown = clamp(p.cooldown, 1, 30, rest);\n// One \"minute\" in ms. Leave it at 60000; a smaller number speeds the timer up for a test run.\nconst minuteMs = clamp(msg.minuteMs, 10, 60000, 60000);\n\nconst parts = [];\nfor (let i = 1; i <= rounds; i++) {\n    parts.push({ kind: 'heat', round: i, minutes: heat, label: 'Round ' + i + ' of ' + rounds });\n    if (i < rounds) parts.push({ kind: 'rest', round: i, minutes: rest, label: 'Break' });\n}\nparts.push({ kind: 'cool', round: rounds, minutes: cooldown, label: 'Final cool-down' });\n\nstop('starting');\nconst id = Date.now();\ncontext.set('session', id);\n\nfunction run(index) {\n    if (context.get('session') !== id) return; // stopped or restarted\n    if (index >= parts.length) {\n        context.set('timer', null);\n        context.set('session', null);\n        node.status({ fill: 'green', shape: 'dot', text: 'done' });\n        node.send({ topic: 'sauna/phase', payload: { kind: 'done', round: rounds, rounds: rounds, minutes: 0, index: index, parts: parts.length, label: 'Session done' } });\n        return;\n    }\n    const part = parts[index];\n    node.status({ fill: part.kind === 'heat' ? 'red' : 'blue', shape: 'dot', text: part.label + ', ' + part.minutes + ' min' });\n    node.send({ topic: 'sauna/phase', payload: Object.assign({ rounds: rounds, index: index, parts: parts.length }, part) });\n    context.set('timer', setTimeout(function () { run(index + 1); }, part.minutes * minuteMs));\n}\nrun(0);\nreturn null;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 390,
+    "y": 160,
+    "wires": [
+      [
+        "d1a5e7c0b2f40006"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40006",
+    "type": "function",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Phase message",
+    "func": "// Phase to notification text. (c) 2026 DIVELUX Inc. MIT License.\n// In:  msg.payload from \"Round timer\".  Out: msg.title and msg.payload as plain text.\nconst ph = msg.payload || {};\nlet title, text;\nswitch (ph.kind) {\n    case 'heat':\n        title = ph.round === 1 ? 'Sauna session started' : 'Break over';\n        text = ph.label + ': ' + ph.minutes + ' min in the heat.';\n        break;\n    case 'rest':\n        title = 'Round ' + ph.round + ' of ' + ph.rounds + ' is over';\n        text = 'Time to step out: ' + ph.minutes + ' min break.';\n        break;\n    case 'cool':\n        title = 'Last round is over';\n        text = 'Step out for the final cool-down: ' + ph.minutes + ' min.';\n        break;\n    case 'done':\n        title = 'Sauna session done';\n        text = 'All ' + ph.rounds + ' rounds and the final cool-down are over.';\n        break;\n    case 'stopped':\n        title = 'Sauna timer stopped';\n        text = 'The session was stopped.';\n        break;\n    default:\n        return null;\n}\nmsg.title = title;\nmsg.payload = title + '. ' + text;\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 580,
+    "y": 160,
+    "wires": [
+      [
+        "d1a5e7c0b2f40007"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40007",
+    "type": "debug",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Notify: phase",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": true,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "payload",
+    "statusType": "auto",
+    "x": 780,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "d1a5e7c0b2f40008",
+    "type": "comment",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Sauna is ready: one notification when the room reaches the target",
+    "info": "Wire your temperature reading into \"Sauna is ready?\" (a Home Assistant state node, an MQTT in node...).\nmsg.payload must be the number, in the same unit as the target. Set the target and unit in \"Set target\".\nIt notifies once, then re-arms after the room cools 5 degrees below the target.",
+    "x": 240,
+    "y": 280,
+    "wires": []
+  },
+  {
+    "id": "d1a5e7c0b2f40009",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "On deploy",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 0.5,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 120,
+    "y": 340,
+    "wires": [
+      [
+        "d1a5e7c0b2f40010"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40010",
+    "type": "change",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Set target: 80 °C",
+    "rules": [
+      {
+        "t": "set",
+        "p": "saunaTarget",
+        "pt": "flow",
+        "to": "80",
+        "tot": "num"
+      },
+      {
+        "t": "set",
+        "p": "saunaUnit",
+        "pt": "flow",
+        "to": "°C",
+        "tot": "str"
+      }
+    ],
+    "action": "",
+    "property": "",
+    "from": "",
+    "to": "",
+    "reg": false,
+    "x": 310,
+    "y": 340,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40011",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Test reading: 72",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "72",
+    "payloadType": "num",
+    "x": 140,
+    "y": 400,
+    "wires": [
+      [
+        "d1a5e7c0b2f40013"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40012",
+    "type": "inject",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Test reading: 81",
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "topic",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "81",
+    "payloadType": "num",
+    "x": 140,
+    "y": 440,
+    "wires": [
+      [
+        "d1a5e7c0b2f40013"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40013",
+    "type": "function",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Sauna is ready?",
+    "func": "// \"The sauna is ready\" check. (c) 2026 DIVELUX Inc. MIT License.\n// In:  msg.payload = a temperature reading (number or numeric string), in the same unit as the target.\n// Out: one message when the reading first reaches the target. It re-arms only after the\n//      room has cooled 5 degrees below the target, so a reading that wobbles around the\n//      target does not send a stream of notifications.\n// Target and unit come from flow context: saunaTarget (default 80) and saunaUnit (default \"°C\").\n// Set them with the \"Set target\" change node.\nconst target = Number(flow.get('saunaTarget'));\nconst t = isFinite(target) && target > 0 ? target : 80;\nconst unit = flow.get('saunaUnit') || '°C';\nconst rearmBelow = t - 5;\n\nconst reading = typeof msg.payload === 'number' ? msg.payload : parseFloat(msg.payload);\nif (!isFinite(reading)) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'not a number: ' + String(msg.payload).slice(0, 20) });\n    return null;\n}\n\nlet armed = context.get('armed');\nif (armed === undefined) armed = true;\n\nif (armed && reading >= t) {\n    context.set('armed', false);\n    node.status({ fill: 'green', shape: 'dot', text: 'ready ' + reading + ' ' + unit });\n    msg.topic = 'sauna/ready';\n    msg.title = 'Sauna is ready';\n    msg.payload = 'Sauna is ready: ' + Math.round(reading) + ' ' + unit + ' (target ' + t + ' ' + unit + ').';\n    return msg;\n}\nif (!armed && reading < rearmBelow) {\n    context.set('armed', true);\n}\nnode.status({ fill: armed ? 'red' : 'green', shape: armed ? 'ring' : 'dot', text: reading + ' ' + unit + (armed ? ' heating' : ' ready') });\nreturn null;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 370,
+    "y": 420,
+    "wires": [
+      [
+        "d1a5e7c0b2f40014"
+      ]
+    ]
+  },
+  {
+    "id": "d1a5e7c0b2f40014",
+    "type": "debug",
+    "z": "d1a5e7c0b2f4a000",
+    "name": "Notify: ready",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": true,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "payload",
+    "statusType": "auto",
+    "x": 570,
+    "y": 420,
+    "wires": []
+  }
+]
